@@ -428,7 +428,7 @@ const Index = () => {
 
   return (
     <div className="relative min-h-screen w-full overflow-hidden bg-background text-foreground">
-      <video ref={videoRef} className="absolute inset-0 h-full w-full object-cover opacity-40 -scale-x-100" playsInline muted />
+      <video ref={videoRef} className="absolute inset-0 h-full w-full object-cover -scale-x-100" playsInline muted />
       <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" />
 
       {/* Seletor de waveform — sempre visível */}
