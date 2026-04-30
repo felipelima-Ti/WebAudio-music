@@ -1,65 +1,450 @@
-import Image from "next/image";
+"use client";
+import { useEffect, useRef, useState } from "react";
+import { fileURLToPath } from "url";
 
-export default function Home() {
+// ===== Tipos globais MediaPipe =====
+declare global {
+  interface Window {
+    Hands: any;
+    Camera: any;
+  }
+}
+
+// ===== CONFIG =====
+const CONFIG = {
+  mode: "melody-chord" as const,
+  wave: "triangle" as OscillatorType,
+  scale: "major" as const,
+  key: "D" as const,
+  snap: true,
+  simple: true,
+};
+
+// Notas customizadas da roda de melodia (mão direita)
+const MELODY_NOTES = [
+  "A3", "B3", "C#4", "D4", "E4", "F#4",
+  "G4", "A4", "B4", "C#5", "D5", "F#5"
+];
+
+// Notas dominantes -> cada uma vira um acorde (raiz + 3ª + 5ª da escala)
+const DOMINANT_NOTES = [
+  "D4", // I
+  "G4", // IV
+  "A4", // V
+  "B3", // vi
+  "F#4" // iii
+];
+
+//Teoria 
+const NOTE_TO_SEMITONE: Record<string, number> = {
+  C: 0, "C#": 1, Db: 1, D: 2, "D#": 3, Eb: 3, E: 4,
+  F: 5, "F#": 6, Gb: 6, G: 7, "G#": 8, Ab: 8, A: 9, "A#": 10, Bb: 10, B: 11,
+};
+const SEMI_TO_NAME = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+const SCALES: Record<string, number[]> = {
+  major: [0, 2, 4, 5, 7, 9, 11],
+};
+
+// midi hz
+const midiToHz = (m: number) => 440 * Math.pow(2, (m - 69) / 12);
+const noteName = (midi: number) => `${SEMI_TO_NAME[midi % 12]}${Math.floor(midi / 12) - 1}`;
+
+// "A#3" midi
+function nameToMidi(name: string): number {
+  const m = name.match(/^([A-G][#b]?)(-?\d+)$/);
+  if (!m) throw new Error("Nota inválida: " + name);
+  const semi = NOTE_TO_SEMITONE[m[1]];
+  const octave = parseInt(m[2], 10);
+  return 12 * (octave + 1) + semi;
+}
+
+// Constrói acorde a partir de uma nota raiz, usando 3ª e 5ª da escala (D maior)
+function chordFromRoot(rootName: string, key: string, scale: string): number[] {
+  const rootMidi = nameToMidi(rootName);
+  const keySemi = NOTE_TO_SEMITONE[key];
+  const intervals = SCALES[scale]; // semitons a partir da tônica
+  // Encontrar grau da raiz dentro da escala (assumindo que pertence)
+  const rel = ((rootMidi - keySemi) % 12 + 12) % 12;
+  let degree = intervals.indexOf(rel);
+  if (degree === -1) {
+    // se não diatônica, retorna tríade maior simples
+    return [rootMidi, rootMidi + 4, rootMidi + 7];
+  }
+  const third = intervals[(degree + 2) % 7] + (degree + 2 >= 7 ? 12 : 0);
+  const fifth = intervals[(degree + 4) % 7] + (degree + 4 >= 7 ? 12 : 0);
+  const base = rootMidi - rel;
+  return [rootMidi, base + third, base + fifth];
+}
+
+//const ROMAN_SIMPLE = ["I", "IV", "V", "ii", "iii"];
+
+// ===== Carregador de scripts MediaPipe =====
+function loadScript(src: string) {
+  return new Promise<void>((resolve, reject) => {
+    if (document.querySelector(`script[src="${src}"]`)) return resolve();
+    const s = document.createElement("script");
+    s.src = src;
+    s.crossOrigin = "anonymous";
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error(`Falha ao carregar ${src}`));
+    document.head.appendChild(s);
+  });
+}
+
+// ===== Voz Web Audio (osc + filtro + envelope) =====
+class Voice {
+  ctx: AudioContext;
+  osc: OscillatorNode;
+  gain: GainNode;
+  filter: BiquadFilterNode;
+  out: AudioNode;
+  released = false;
+
+  constructor(ctx: AudioContext, dest: AudioNode, freq: number, wave: OscillatorType, peakGain = 0.2) {
+    this.ctx = ctx;
+    this.out = dest;
+    this.osc = ctx.createOscillator();
+    this.osc.type = wave;
+    this.osc.frequency.value = freq;
+    this.filter = ctx.createBiquadFilter();
+    this.filter.type = "lowpass";
+    this.filter.frequency.value = 1800;
+    this.filter.Q.value = 0.7;
+    this.gain = ctx.createGain();
+    this.gain.gain.value = 0;
+    this.osc.connect(this.filter).connect(this.gain).connect(dest);
+    const now = ctx.currentTime;
+    // attack suave
+    this.gain.gain.cancelScheduledValues(now);
+    this.gain.gain.setValueAtTime(0, now);
+    this.gain.gain.linearRampToValueAtTime(peakGain, now + 0.35);
+    // sustain
+    this.gain.gain.linearRampToValueAtTime(peakGain * 0.85, now + 0.6);
+    this.osc.start();
+  }
+
+  setVolume(v: number) {
+    const now = this.ctx.currentTime;
+    this.gain.gain.cancelScheduledValues(now);
+    this.gain.gain.setTargetAtTime(v, now, 0.08);
+  }
+
+  release(time = 1.2) {
+    if (this.released) return;
+    this.released = true;
+    const now = this.ctx.currentTime;
+    this.gain.gain.cancelScheduledValues(now);
+    this.gain.gain.setValueAtTime(this.gain.gain.value, now);
+    this.gain.gain.linearRampToValueAtTime(0, now + time);
+    this.osc.stop(now + time + 0.05);
+    setTimeout(() => {
+      try { this.osc.disconnect(); this.filter.disconnect(); this.gain.disconnect(); } catch {}
+    }, (time + 0.2) * 1000);
+  }
+}
+
+const Index = () => {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [started, setStarted] = useState(false);
+  const [status, setStatus] = useState("");
+  const [wave, setWave] = useState<OscillatorType>(CONFIG.wave);
+  const waveRef = useRef<OscillatorType>(CONFIG.wave);
+  useEffect(() => { waveRef.current = wave; }, [wave]);
+
+  // Refs de áudio / estado
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const masterRef = useRef<GainNode | null>(null);
+  const reverbRef = useRef<ConvolverNode | null>(null);
+  const chordVoicesRef = useRef<Voice[]>([]);
+  const noteVoiceRef = useRef<Voice | null>(null);
+  const currentChordRef = useRef<number>(-1);
+  const currentNoteRef = useRef<number>(-1);
+
+  // Conteúdo musical (custom)
+  const notesMidi = MELODY_NOTES.map(nameToMidi);
+  const chords = DOMINANT_NOTES.map((n) => chordFromRoot(n, CONFIG.key, CONFIG.scale));
+  const NUM_NOTES = notesMidi.length;
+  const NUM_CHORDS = chords.length;
+  const noteLabels = MELODY_NOTES;
+  const chordLabels = DOMINANT_NOTES;
+
+  // ===== Reverb impulse simples =====
+  function makeImpulse(ctx: AudioContext, duration = 2.2, decay = 2.5) {
+    const rate = ctx.sampleRate;
+    const length = rate * duration;
+    const impulse = ctx.createBuffer(2, length, rate);
+    for (let c = 0; c < 2; c++) {
+      const ch = impulse.getChannelData(c);
+      for (let i = 0; i < length; i++) {
+        ch[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / length, decay);
+      }
+    }
+    return impulse;
+  }
+
+  async function initAudio() {
+    const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+    audioCtxRef.current = ctx;
+    const master = ctx.createGain();
+    master.gain.value = 0.9;
+    const reverb = ctx.createConvolver();
+    reverb.buffer = makeImpulse(ctx);
+    const wet = ctx.createGain();
+    wet.gain.value = 0.25;
+    const dry = ctx.createGain();
+    dry.gain.value = 0.85;
+    master.connect(dry).connect(ctx.destination);
+    master.connect(reverb).connect(wet).connect(ctx.destination);
+    masterRef.current = master;
+    reverbRef.current = reverb;
+  }
+
+  // ===== Helpers geometria =====
+  function getSector(x: number, y: number, cx: number, cy: number, num: number) {
+    let angle = Math.atan2(y - cy, x - cx);
+    angle = (angle + Math.PI * 2) % (Math.PI * 2);
+    return Math.floor(angle / ((Math.PI * 2) / num));
+  }
+  function pinch(lm: any) {
+    const dx = lm[4].x - lm[8].x;
+    const dy = lm[4].y - lm[8].y;
+    return 1 - Math.min(Math.sqrt(dx * dx + dy * dy) * 5, 1);
+  }
+  function isInMuteZone(x: number, y: number, cx: number, cy: number, radius: number) {
+    return Math.hypot(x - cx, y - cy) < radius * 0.35;
+  }
+
+  // ===== Som =====
+  function playChord(idx: number) {
+    const ctx = audioCtxRef.current!;
+    const master = masterRef.current!;
+    stopChord();
+    const midis = chords[idx];
+    chordVoicesRef.current = midis.map(
+      (m) => new Voice(ctx, master, midiToHz(m), waveRef.current, 0.12)
+    );
+    currentChordRef.current = idx;
+  }
+  function stopChord() {
+    chordVoicesRef.current.forEach((v) => v.release(1.4));
+    chordVoicesRef.current = [];
+    currentChordRef.current = -1;
+  }
+  function playNote(idx: number) {
+    const ctx = audioCtxRef.current!;
+    const master = masterRef.current!;
+    stopNote();
+    noteVoiceRef.current = new Voice(ctx, master, midiToHz(notesMidi[idx]), waveRef.current, 0.22);
+    currentNoteRef.current = idx;
+  }
+  function stopNote() {
+    if (noteVoiceRef.current) noteVoiceRef.current.release(0.9);
+    noteVoiceRef.current = null;
+    currentNoteRef.current = -1;
+  }
+
+  // Desenho da roda de acordes/notas
+  function drawWheel(
+    ctx: CanvasRenderingContext2D,
+    cx: number, cy: number, r: number,
+    num: number, active: number, labels: string[]
+  ) {
+    for (let i = 0; i < num; i++) {
+      const a1 = i * ((Math.PI * 2) / num);
+      const a2 = (i + 1) * ((Math.PI * 2) / num);
+      const mid = (a1 + a2) / 2;
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.arc(cx, cy, r, a1, a2);
+      ctx.closePath();
+      ctx.fillStyle = i === active ? "rgba(255,255,255,0.5)" : "rgba(34,34,34,0.25)";
+      ctx.fill();
+      ctx.strokeStyle = "rgba(255,255,255,0.3)";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      const tx = cx + Math.cos(mid) * (r * 0.7);
+      const ty = cy + Math.sin(mid) * (r * 0.7);
+      ctx.fillStyle = "white";
+      ctx.font = "13px Arial";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(labels[i] ?? "", tx, ty);
+    }
+    ctx.beginPath();
+    ctx.arc(cx, cy, r * 0.2, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(0,0,0,0.7)";
+    ctx.fill();
+  }
+
+  // onResults 
+  function onResults(results: any) {
+    const canvas = canvasRef.current!;
+    const ctx = canvas.getContext("2d")!;
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const cx1 = canvas.width * 0.3;
+    const cx2 = canvas.width * 0.7;
+    const cy = canvas.height - 220;
+
+    let leftHand: any = null;
+    let rightHand: any = null;
+    if (results.multiHandLandmarks && results.multiHandedness) {
+      results.multiHandedness.forEach((h: any, i: number) => {
+        if (h.label === "Left") leftHand = results.multiHandLandmarks[i];
+        else rightHand = results.multiHandLandmarks[i];
+      });
+    }
+
+    // Se a mão não for detectada, para o som correspondente
+    if (!leftHand && currentChordRef.current !== -1) stopChord();
+    if ((!rightHand || (CONFIG.mode === "melody-chord" && !leftHand)) && currentNoteRef.current !== -1) stopNote();
+
+    //  mão ESQUERDA ACORDES
+    if (leftHand) {
+      const x = (1 - leftHand[8].x) * canvas.width;
+      const y = leftHand[8].y * canvas.height;
+      const muted = isInMuteZone(x, y, cx1, cy, 180);
+      if (muted) {
+        if (currentChordRef.current !== -1) stopChord();
+      } else {
+        const dist = Math.hypot(x - cx1, y - cy);
+        if (dist < 180) {
+          const chordIndex = getSector(x, y, cx1, cy, NUM_CHORDS);
+          if (chordIndex !== currentChordRef.current) playChord(chordIndex);
+        } else if (currentChordRef.current !== -1) stopChord();
+      }
+      ctx.beginPath();
+      ctx.arc(x, y, 10, 0, Math.PI * 2);
+      ctx.fillStyle = muted ? "blue" : "cyan";
+      ctx.fill();
+    }
+
+    //  mão DIREITA  NOTAS (melody-chord: só toca se chord ativo)
+    if (rightHand) {
+      const x = (1 - rightHand[8].x) * canvas.width;
+      const y = rightHand[8].y * canvas.height;
+      const muted = isInMuteZone(x, y, cx2, cy, 180);
+      if (muted || (CONFIG.mode === "melody-chord" && currentChordRef.current === -1)) {
+        if (currentNoteRef.current !== -1) stopNote();
+      } else {
+        const dist = Math.hypot(x - cx2, y - cy);
+        if (dist < 220) {
+          let noteIndex = getSector(x, y, cx2, cy, NUM_NOTES);
+          // snap: já estamos sempre em notas da escala (buildScaleNotes)
+          if (CONFIG.snap) noteIndex = Math.max(0, Math.min(NUM_NOTES - 1, noteIndex));
+          if (noteIndex !== currentNoteRef.current) playNote(noteIndex);
+        } else if (currentNoteRef.current !== -1) stopNote();
+      }
+      ctx.beginPath();
+      ctx.arc(x, y, 10, 0, Math.PI * 2);
+      ctx.fillStyle = muted ? "blue" : "red";
+      ctx.fill();
+    }
+
+    drawWheel(ctx, cx1, cy, 180, NUM_CHORDS, currentChordRef.current, chordLabels);
+    drawWheel(ctx, cx2, cy, 180, NUM_NOTES, currentNoteRef.current, noteLabels);
+
+    ctx.fillStyle = "white";
+    ctx.font = "14px Arial";
+    ctx.fillText(`Key: ${CONFIG.key} ${CONFIG.scale}`, 55, 40);
+    ctx.fillText(`wave: ${waveRef.current} | ${NUM_NOTES} notas`, 90, 70);
+    ctx.fillText(currentChordRef.current !== -1 ? "Acorde ON" : "Acorde OFF", 54, 104);
+  }
+
+  async function startApp() {
+    setStatus("Carregando MediaPipe...");
+    try {
+      await loadScript("https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js");
+      await loadScript("https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js");
+
+      setStatus("Iniciando áudio...");
+      await initAudio();
+      // Resume after gesture (autoplay policy)
+      await audioCtxRef.current?.resume();
+
+      setStatus("Iniciando câmera...");
+      const hands = new window.Hands({
+        locateFile: (file: string) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`,
+      });
+      hands.setOptions({
+        maxNumHands: 2,
+        modelComplexity: 1,
+        minDetectionConfidence: 0.7,
+        minTrackingConfidence: 0.6,
+      });
+      hands.onResults(onResults);
+
+      const camera = new window.Camera(videoRef.current!, {
+        onFrame: async () => {
+          await hands.send({ image: videoRef.current! });
+        },
+        width: 640,
+        height: 480,
+      });
+      await camera.start();
+      setStarted(true);
+      setStatus("");
+    } catch (e: any) {
+      console.error(e);
+      setStatus("Erro: " + e.message);
+    }
+  }
+
+  useEffect(() => {
+    return () => {
+      stopChord();
+      stopNote();
+      audioCtxRef.current?.close();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
+    <div className="relative min-h-screen w-full overflow-hidden bg-background text-foreground">
+      <video ref={videoRef} className="absolute inset-0 h-full w-full object-cover -scale-x-100" playsInline muted />
+      <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" />
+
+      {/* Seletor de Onda — sempre visível */}
+      <div className="absolute top-4 right-4 z-10 flex flex-col gap-2 rounded-lg bg-background/70 backdrop-blur p-3 border border-border">
+        <span className="text-xs text-muted-foreground uppercase tracking-wide">Forma de Onda</span>
+        <div className="flex gap-1 ">
+          {(["sine", "triangle", "square", "sawtooth"] as OscillatorType[]).map((w) => (
+            <button
+              key={w}
+              onClick={() => setWave(w)}
+              className={`px-3 py-1.5 rounded text-xs font-medium transition border border-gray-600 ${
+                wave === w
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-muted text-muted-foreground hover:bg-muted/70"
+              }`}
             >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
+              {w}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {!started && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 bg-background/80 backdrop-blur">
+          <h1 className="text-3xl font-semibold">Sound Hand Synth · Web Audio</h1>
+          <p className="text-muted-foreground text-sm max-w-md text-center">
+            Modo {CONFIG.mode} · Tom {CONFIG.key} {CONFIG.scale} · onda {wave} · {MELODY_NOTES.length} notas · snap {CONFIG.snap ? "on" : "off"}
           </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+          <button
+            onClick={startApp}
+            className="rounded-md bg-primary px-6 py-3 text-primary-foreground hover:opacity-90 transition border "
           >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+            Iniciar
+          </button>
+          {status && <p className="text-sm text-muted-foreground">{status}</p>}
         </div>
-      </main>
+      )}
     </div>
   );
-}
+};
+
+export default Index;
+
