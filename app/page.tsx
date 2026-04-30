@@ -1,8 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { fileURLToPath } from "url";
-
-// ===== Tipos globais MediaPipe =====
+// Tipos globais MediaPipe 
 declare global {
   interface Window {
     Hands: any;
@@ -244,7 +242,7 @@ const Index = () => {
     currentNoteRef.current = -1;
   }
 
-  // Desenho da roda de acordes/notas
+  //Desenho das rodas e labels
   function drawWheel(
     ctx: CanvasRenderingContext2D,
     cx: number, cy: number, r: number,
@@ -277,7 +275,7 @@ const Index = () => {
     ctx.fill();
   }
 
-  // onResults 
+  // ===== onResults =====
   function onResults(results: any) {
     const canvas = canvasRef.current!;
     const ctx = canvas.getContext("2d")!;
@@ -289,23 +287,51 @@ const Index = () => {
     const cx2 = canvas.width * 0.7;
     const cy = canvas.height - 220;
 
-    let leftHand: any = null;
-    let rightHand: any = null;
-    if (results.multiHandLandmarks && results.multiHandedness) {
-      results.multiHandedness.forEach((h: any, i: number) => {
-        if (h.label === "Left") leftHand = results.multiHandLandmarks[i];
-        else rightHand = results.multiHandLandmarks[i];
-      });
+    // Coletar as mãos detectadas
+    const hands: { x: number; y: number; lm: any }[] = [];
+    if (results.multiHandLandmarks) {
+      for (const lm of results.multiHandLandmarks) {
+        hands.push({
+          x: (1 - lm[8].x) * canvas.width,
+          y: lm[8].y * canvas.height,
+          lm,
+        });
+      }
     }
 
-    // Se a mão não for detectada, para o som correspondente
-    if (!leftHand && currentChordRef.current !== -1) stopChord();
-    if ((!rightHand || (CONFIG.mode === "melody-chord" && !leftHand)) && currentNoteRef.current !== -1) stopNote();
+    // Atribuir cada mão à roda mais próxima (acorde ou melodia)
+    let chordHand: { x: number; y: number; lm: any } | null = null;
+    let noteHand: { x: number; y: number; lm: any } | null = null;
 
-    //  mão ESQUERDA ACORDES
-    if (leftHand) {
-      const x = (1 - leftHand[8].x) * canvas.width;
-      const y = leftHand[8].y * canvas.height;
+    if (hands.length === 1) {
+      const h = hands[0];
+      const dC = Math.hypot(h.x - cx1, h.y - cy);
+      const dN = Math.hypot(h.x - cx2, h.y - cy);
+      if (dC < dN) chordHand = h;
+      else noteHand = h;
+    } else if (hands.length >= 2) {
+      const h0 = hands[0], h1 = hands[1];
+      // custo de cada atribuição: soma das distâncias às rodas
+      const costA =
+        Math.hypot(h0.x - cx1, h0.y - cy) + Math.hypot(h1.x - cx2, h1.y - cy);
+      const costB =
+        Math.hypot(h1.x - cx1, h1.y - cy) + Math.hypot(h0.x - cx2, h0.y - cy);
+      if (costA <= costB) {
+        chordHand = h0;
+        noteHand = h1;
+      } else {
+        chordHand = h1;
+        noteHand = h0;
+      }
+    }
+
+    // Se nenhuma mão atribuída a uma roda, para o som correspondente
+    if (!chordHand && currentChordRef.current !== -1) stopChord();
+    if ((!noteHand || (CONFIG.mode === "melody-chord" && !chordHand)) && currentNoteRef.current !== -1) stopNote();
+
+    // RODA DE ACORDES
+    if (chordHand) {
+      const { x, y } = chordHand;
       const muted = isInMuteZone(x, y, cx1, cy, 180);
       if (muted) {
         if (currentChordRef.current !== -1) stopChord();
@@ -322,10 +348,9 @@ const Index = () => {
       ctx.fill();
     }
 
-    //  mão DIREITA  NOTAS (melody-chord: só toca se chord ativo)
-    if (rightHand) {
-      const x = (1 - rightHand[8].x) * canvas.width;
-      const y = rightHand[8].y * canvas.height;
+    // RODA DE NOTAS (melody-chord: só toca se acorde ativo)
+    if (noteHand) {
+      const { x, y } = noteHand;
       const muted = isInMuteZone(x, y, cx2, cy, 180);
       if (muted || (CONFIG.mode === "melody-chord" && currentChordRef.current === -1)) {
         if (currentNoteRef.current !== -1) stopNote();
@@ -333,7 +358,6 @@ const Index = () => {
         const dist = Math.hypot(x - cx2, y - cy);
         if (dist < 220) {
           let noteIndex = getSector(x, y, cx2, cy, NUM_NOTES);
-          // snap: já estamos sempre em notas da escala (buildScaleNotes)
           if (CONFIG.snap) noteIndex = Math.max(0, Math.min(NUM_NOTES - 1, noteIndex));
           if (noteIndex !== currentNoteRef.current) playNote(noteIndex);
         } else if (currentNoteRef.current !== -1) stopNote();
@@ -349,9 +373,9 @@ const Index = () => {
 
     ctx.fillStyle = "white";
     ctx.font = "14px Arial";
-    ctx.fillText(`Key: ${CONFIG.key} ${CONFIG.scale}`, 55, 40);
-    ctx.fillText(`wave: ${waveRef.current} | ${NUM_NOTES} notas`, 90, 70);
-    ctx.fillText(currentChordRef.current !== -1 ? "Acorde ON" : "Acorde OFF", 54, 104);
+    ctx.fillText(`Key: ${CONFIG.key} ${CONFIG.scale}`, 50, 40);
+    ctx.fillText(`wave: ${waveRef.current } | ${NUM_NOTES} notas`, 85, 64);
+    ctx.fillText(currentChordRef.current !== -1 ? "ACORDE ON" : "ACORDE OFF", 55, 104);
   }
 
   async function startApp() {
@@ -404,13 +428,13 @@ const Index = () => {
 
   return (
     <div className="relative min-h-screen w-full overflow-hidden bg-background text-foreground">
-      <video ref={videoRef} className="absolute inset-0 h-full w-full object-cover -scale-x-100" playsInline muted />
+      <video ref={videoRef} className="absolute inset-0 h-full w-full object-cover opacity-40 -scale-x-100" playsInline muted />
       <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" />
 
-      {/* Seletor de Onda — sempre visível */}
+      {/* Seletor de waveform — sempre visível */}
       <div className="absolute top-4 right-4 z-10 flex flex-col gap-2 rounded-lg bg-background/70 backdrop-blur p-3 border border-border">
         <span className="text-xs text-muted-foreground uppercase tracking-wide">Forma de Onda</span>
-        <div className="flex gap-1 ">
+        <div className="flex gap-1">
           {(["sine", "triangle", "square", "sawtooth"] as OscillatorType[]).map((w) => (
             <button
               key={w}
@@ -435,7 +459,7 @@ const Index = () => {
           </p>
           <button
             onClick={startApp}
-            className="rounded-md bg-primary px-6 py-3 text-primary-foreground hover:opacity-90 transition border "
+            className="rounded-md bg-primary px-6 py-3 text-primary-foreground transition border"
           >
             Iniciar
           </button>
