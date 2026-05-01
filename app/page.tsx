@@ -41,7 +41,7 @@ function loadScript(src: string) {
     document.head.appendChild(s);
   });
 }
-
+// Componente principal do aplicativo, que integra a detecção de mãos com o sintetizador de acordes
 export default function SoundHandSynth() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -63,16 +63,16 @@ export default function SoundHandSynth() {
   const currentQualityRef = useRef<number>(-1);
   const releaseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const RELEASE_SECONDS = 0.9;
-
+// Mantém uma referência atualizada da forma de onda para uso nas funções de mapeamento, evitando problemas de closure
   useEffect(() => {
     waveRef.current = wave;
     chordOscsRef.current.forEach((o) => (o.type = wave as any));
   }, [wave]);
-
+// Mantém uma referência atualizada do modo simples para uso nas funções de mapeamento, evitando problemas de closure
   useEffect(() => {
     simpleRef.current = simple;
   }, [simple]);
-
+// Atualiza a frequência de corte do filtro lowpass sempre que o valor de cutoff mudar, com um pequeno fade para evitar cliques
   useEffect(() => {
     if (chordFilterRef.current) {
       chordFilterRef.current.frequency.rampTo(cutoff, 0.05);
@@ -81,7 +81,7 @@ export default function SoundHandSynth() {
 
   const NUM_QUALITIES = QUALITY_KEYS.length;
   const qualityLabels = QUALITY_KEYS.map((k) => k);
-
+// Função para inicializar o áudio, criando os osciladores, ganho e filtro necessários para tocar os acordes
   async function initAudio() {
     await Tone.start();
     const chordFilter = new Tone.Filter(cutoff, "lowpass").toDestination();
@@ -96,23 +96,25 @@ export default function SoundHandSynth() {
     chordGainRef.current = chordGain;
     chordFilterRef.current = chordFilter;
   }
-
+// Função para determinar em qual setor da roda a mão está, com base na posição x,y e no centro cx,cy
   function getSector(x: number, y: number, cx: number, cy: number, num: number) {
     let angle = Math.atan2(y - cy, x - cx);
     angle = (angle + Math.PI * 2) % (Math.PI * 2);
     return Math.floor(angle / ((Math.PI * 2) / num));
   }
+  // Define uma zona central onde o acorde é silenciado, para evitar mudanças acidentais ao posicionar a mão no centro da roda
   function isInMuteZone(x: number, y: number, cx: number, cy: number, radius: number) {
     return Math.hypot(x - cx, y - cy) < radius * 0.35;
   }
-
+// Função para converter um índice para a respectiva raiz MIDI
   function sliceToRootMidi(i: number) {
     return simpleRef.current ? DIATONIC_ROOTS[i] : i;
   }
+  // Função para converter um índice para o nome da nota correspondente, dependendo do modo simples ou completo
   function sliceToRootName(i: number) {
     return simpleRef.current ? DIATONIC_NAMES[i] : NOTE_NAMES[i];
   }
-
+// Constrói as frequências dos 4 osciladores com base na raiz 
   function buildChordFreqs(rootIdx: number, qualityIdx: number): number[] {
     const rootMidi = MIDI_BASE + sliceToRootMidi(rootIdx);
     const intervals = CHORD_TYPES[QUALITY_KEYS[qualityIdx]].intervals;
@@ -123,7 +125,7 @@ export default function SoundHandSynth() {
     }
     return freqs;
   }
-
+// Função para aplicar um acorde com base na raiz 
   function applyChord(rootIdx: number, qualityIdx: number) {
     const oscs = chordOscsRef.current;
     const cg = chordGainRef.current;
@@ -138,7 +140,7 @@ export default function SoundHandSynth() {
     currentRootRef.current = rootIdx;
     currentQualityRef.current = qualityIdx;
   }
-
+// Função para silenciar o acorde, com um fade-out suave
   function silenceChord() {
     const cg = chordGainRef.current;
     if (!cg) return;
@@ -150,7 +152,7 @@ export default function SoundHandSynth() {
     currentQualityRef.current = -1;
     if (releaseTimeoutRef.current) clearTimeout(releaseTimeoutRef.current);
   }
-
+// Desenha uma roda de acorde com setores para cada nota ou qualidade
   function drawWheel(
     ctx: CanvasRenderingContext2D,
     cx: number, cy: number, r: number,
@@ -182,18 +184,21 @@ export default function SoundHandSynth() {
     ctx.fillStyle = "rgba(0,0,0,0.7)";
     ctx.fill();
   }
-
+// Função chamada a cada frame com os resultados da detecção de mãos, responsável por desenhar as rodas e determinar os acordes a tocar com base na posição das mãos
   function onResults(results: any) {
     const canvas = canvasRef.current!;
     const ctx = canvas.getContext("2d")!;
     canvas.width = window.innerWidth;
     canvas.height = window.innerHeight;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+// Define o tamanho e posição das rodas de acorde, adaptando para telas menores
+    const isMobile = canvas.width < 768;
+
+    const R = Math.min(canvas.width, canvas.height) * (isMobile ? 0.22 : 0.22);
+    const cy = canvas.height - R * (isMobile ? 1.6 : 1.6);
 
     const cx1 = canvas.width * 0.25;
     const cx2 = canvas.width * 0.75;
-    const cy = canvas.height - 240;
-    const R = 180;
 
     const NUM_ROOTS = simpleRef.current ? DIATONIC_NAMES.length : NOTE_NAMES.length;
     const rootLabels = simpleRef.current ? DIATONIC_NAMES : NOTE_NAMES;
@@ -208,7 +213,7 @@ export default function SoundHandSynth() {
         });
       }
     }
-
+// Se nenhuma mão for detectada, silencia o acorde e desenha as rodas sem seleção
     if (hands.length === 0) {
       silenceChord();
       drawWheel(ctx, cx1, cy, R, NUM_ROOTS, -1, rootLabels);
@@ -220,10 +225,10 @@ export default function SoundHandSynth() {
       ctx.fillText(`Acorde: —`, 30, 64);
       return;
     }
-
+// Se uma ou duas mãos forem detectadas, determina qual é a mão da raiz e qual é a mão da qualidade com base na proximidade das mãos aos centros das rodas
     let rootHand: { x: number; y: number } | null = null;
     let qualityHand: { x: number; y: number } | null = null;
-
+// Se apenas uma mão for detectada, atribui como mão da raiz ou da qualidade com base na proximidade aos centros das rodas
     if (hands.length === 1) {
       const h = hands[0];
       const dL = Math.hypot(h.x - cx1, h.y - cy);
@@ -236,7 +241,7 @@ export default function SoundHandSynth() {
       if (costA <= costB) { rootHand = h0; qualityHand = h1; }
       else { rootHand = h1; qualityHand = h0; }
     }
-
+// Verifica se as mãos estão dentro das rodas e determina os setores selecionados para raiz e qualidade, desenhando um círculo indicador na posição da mão
     let selectedRoot = -1;
     let selectedQuality = -1;
     let rootHandOnWheel = false;
@@ -272,7 +277,7 @@ export default function SoundHandSynth() {
     } else {
       silenceChord();
     }
-
+// Desenha as rodas de acorde com os setores selecionados para raiz e qualidade, e exibe informações sobre a forma de onda e o acorde atual
     drawWheel(ctx, cx1, cy, R, NUM_ROOTS, currentRootRef.current, rootLabels);
     drawWheel(ctx, cx2, cy, R, NUM_QUALITIES, currentQualityRef.current, qualityLabels as unknown as string[]);
 
