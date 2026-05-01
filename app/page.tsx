@@ -194,8 +194,8 @@ export default function SoundHandSynth() {
 // Define o tamanho e posição das rodas de acorde, adaptando para telas menores
     const isMobile = canvas.width < 768;
 
-    const R = Math.min(canvas.width, canvas.height) * (isMobile ? 0.22 : 0.22);
-    const cy = canvas.height - R * (isMobile ? 1.6 : 1.6);
+    const R = Math.min(canvas.width, canvas.height) * (isMobile ? 0.22 : 0.30);
+    const cy = canvas.height - R * (isMobile ? 1.6 : 1.1);
 
     const cx1 = canvas.width * 0.25;
     const cx2 = canvas.width * 0.75;
