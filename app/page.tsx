@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-// Tipos globais MediaPipe 
+import * as Tone from "tone";
+
 declare global {
   interface Window {
     Hands: any;
@@ -8,75 +9,27 @@ declare global {
   }
 }
 
-// ===== CONFIG =====
-const CONFIG = {
-  mode: "melody-chord" as const,
-  wave: "triangle" as OscillatorType,
-  scale: "major" as const,
-  key: "D" as const,
-  snap: true,
-  simple: true,
+const MIDI_BASE = 48;
+const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+const DIATONIC_ROOTS = [0, 2, 4, 5, 7, 9, 11];
+const DIATONIC_NAMES = ["C", "D", "E", "F", "G", "A", "B"];
+
+const QUALITY_KEYS = ["maj", "maj7", "7", "sus4", "m", "m7", "dim", "aug"] as const;
+type QualityKey = typeof QUALITY_KEYS[number];
+
+const CHORD_TYPES: Record<QualityKey, { intervals: number[]; suffix: string }> = {
+  maj: { intervals: [0, 4, 7], suffix: "" },
+  maj7: { intervals: [0, 4, 7, 11], suffix: "maj7" },
+  "7": { intervals: [0, 4, 7, 10], suffix: "7" },
+  sus4: { intervals: [0, 5, 7], suffix: "sus4" },
+  m: { intervals: [0, 3, 7], suffix: "m" },
+  m7: { intervals: [0, 3, 7, 10], suffix: "m7" },
+  dim: { intervals: [0, 3, 6], suffix: "dim" },
+  aug: { intervals: [0, 4, 8], suffix: "aug" },
 };
 
-// Notas customizadas da roda de melodia (mão direita)
-const MELODY_NOTES = [
-  "A3", "B3", "C#4", "D4", "E4", "F#4",
-  "G4", "A4", "B4", "C#5", "D5", "F#5"
-];
+const midiToFreq = (m: number) => 440 * Math.pow(2, (m - 69) / 12);
 
-// Notas dominantes -> cada uma vira um acorde (raiz + 3ª + 5ª da escala)
-const DOMINANT_NOTES = [
-  "D4", // I
-  "G4", // IV
-  "A4", // V
-  "B3", // vi
-  "F#4" // iii
-];
-
-//Teoria 
-const NOTE_TO_SEMITONE: Record<string, number> = {
-  C: 0, "C#": 1, Db: 1, D: 2, "D#": 3, Eb: 3, E: 4,
-  F: 5, "F#": 6, Gb: 6, G: 7, "G#": 8, Ab: 8, A: 9, "A#": 10, Bb: 10, B: 11,
-};
-const SEMI_TO_NAME = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
-const SCALES: Record<string, number[]> = {
-  major: [0, 2, 4, 5, 7, 9, 11],
-};
-
-// midi hz
-const midiToHz = (m: number) => 440 * Math.pow(2, (m - 69) / 12);
-const noteName = (midi: number) => `${SEMI_TO_NAME[midi % 12]}${Math.floor(midi / 12) - 1}`;
-
-// "A#3" midi
-function nameToMidi(name: string): number {
-  const m = name.match(/^([A-G][#b]?)(-?\d+)$/);
-  if (!m) throw new Error("Nota inválida: " + name);
-  const semi = NOTE_TO_SEMITONE[m[1]];
-  const octave = parseInt(m[2], 10);
-  return 12 * (octave + 1) + semi;
-}
-
-// Constrói acorde a partir de uma nota raiz, usando 3ª e 5ª da escala (D maior)
-function chordFromRoot(rootName: string, key: string, scale: string): number[] {
-  const rootMidi = nameToMidi(rootName);
-  const keySemi = NOTE_TO_SEMITONE[key];
-  const intervals = SCALES[scale]; // semitons a partir da tônica
-  // Encontrar grau da raiz dentro da escala (assumindo que pertence)
-  const rel = ((rootMidi - keySemi) % 12 + 12) % 12;
-  let degree = intervals.indexOf(rel);
-  if (degree === -1) {
-    // se não diatônica, retorna tríade maior simples
-    return [rootMidi, rootMidi + 4, rootMidi + 7];
-  }
-  const third = intervals[(degree + 2) % 7] + (degree + 2 >= 7 ? 12 : 0);
-  const fifth = intervals[(degree + 4) % 7] + (degree + 4 >= 7 ? 12 : 0);
-  const base = rootMidi - rel;
-  return [rootMidi, base + third, base + fifth];
-}
-
-//const ROMAN_SIMPLE = ["I", "IV", "V", "ii", "iii"];
-
-// ===== Carregador de scripts MediaPipe =====
 function loadScript(src: string) {
   return new Promise<void>((resolve, reject) => {
     if (document.querySelector(`script[src="${src}"]`)) return resolve();
@@ -89,160 +42,115 @@ function loadScript(src: string) {
   });
 }
 
-// ===== Voz Web Audio (osc + filtro + envelope) =====
-class Voice {
-  ctx: AudioContext;
-  osc: OscillatorNode;
-  gain: GainNode;
-  filter: BiquadFilterNode;
-  out: AudioNode;
-  released = false;
-
-  constructor(ctx: AudioContext, dest: AudioNode, freq: number, wave: OscillatorType, peakGain = 0.2) {
-    this.ctx = ctx;
-    this.out = dest;
-    this.osc = ctx.createOscillator();
-    this.osc.type = wave;
-    this.osc.frequency.value = freq;
-    this.filter = ctx.createBiquadFilter();
-    this.filter.type = "lowpass";
-    this.filter.frequency.value = 1800;
-    this.filter.Q.value = 0.7;
-    this.gain = ctx.createGain();
-    this.gain.gain.value = 0;
-    this.osc.connect(this.filter).connect(this.gain).connect(dest);
-    const now = ctx.currentTime;
-    // attack suave
-    this.gain.gain.cancelScheduledValues(now);
-    this.gain.gain.setValueAtTime(0, now);
-    this.gain.gain.linearRampToValueAtTime(peakGain, now + 0.35);
-    // sustain
-    this.gain.gain.linearRampToValueAtTime(peakGain * 0.85, now + 0.6);
-    this.osc.start();
-  }
-
-  setVolume(v: number) {
-    const now = this.ctx.currentTime;
-    this.gain.gain.cancelScheduledValues(now);
-    this.gain.gain.setTargetAtTime(v, now, 0.08);
-  }
-
-  release(time = 1.2) {
-    if (this.released) return;
-    this.released = true;
-    const now = this.ctx.currentTime;
-    this.gain.gain.cancelScheduledValues(now);
-    this.gain.gain.setValueAtTime(this.gain.gain.value, now);
-    this.gain.gain.linearRampToValueAtTime(0, now + time);
-    this.osc.stop(now + time + 0.05);
-    setTimeout(() => {
-      try { this.osc.disconnect(); this.filter.disconnect(); this.gain.disconnect(); } catch {}
-    }, (time + 0.2) * 1000);
-  }
-}
-
-const Index = () => {
+export default function SoundHandSynth() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [started, setStarted] = useState(false);
   const [status, setStatus] = useState("");
-  const [wave, setWave] = useState<OscillatorType>(CONFIG.wave);
-  const waveRef = useRef<OscillatorType>(CONFIG.wave);
-  useEffect(() => { waveRef.current = wave; }, [wave]);
+  const [simple, setSimple] = useState(true);
+  const [wave, setWave] = useState<"sine" | "triangle" | "square" | "sawtooth">("triangle");
+  const [cutoff, setCutoff] = useState(1800);
 
-  // Refs de áudio / estado
-  const audioCtxRef = useRef<AudioContext | null>(null);
-  const masterRef = useRef<GainNode | null>(null);
-  const reverbRef = useRef<ConvolverNode | null>(null);
-  const chordVoicesRef = useRef<Voice[]>([]);
-  const noteVoiceRef = useRef<Voice | null>(null);
-  const currentChordRef = useRef<number>(-1);
-  const currentNoteRef = useRef<number>(-1);
+  const waveRef = useRef(wave);
+  const simpleRef = useRef(simple);
 
-  // Conteúdo musical (custom)
-  const notesMidi = MELODY_NOTES.map(nameToMidi);
-  const chords = DOMINANT_NOTES.map((n) => chordFromRoot(n, CONFIG.key, CONFIG.scale));
-  const NUM_NOTES = notesMidi.length;
-  const NUM_CHORDS = chords.length;
-  const noteLabels = MELODY_NOTES;
-  const chordLabels = DOMINANT_NOTES;
+  const chordOscsRef = useRef<Tone.Oscillator[]>([]);
+  const chordGainRef = useRef<Tone.Gain | null>(null);
+  const chordFilterRef = useRef<Tone.Filter | null>(null);
+  const currentChordGainRef = useRef(0);
 
-  // ===== Reverb impulse simples =====
-  function makeImpulse(ctx: AudioContext, duration = 2.2, decay = 2.5) {
-    const rate = ctx.sampleRate;
-    const length = rate * duration;
-    const impulse = ctx.createBuffer(2, length, rate);
-    for (let c = 0; c < 2; c++) {
-      const ch = impulse.getChannelData(c);
-      for (let i = 0; i < length; i++) {
-        ch[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / length, decay);
-      }
+  const currentRootRef = useRef<number>(-1);
+  const currentQualityRef = useRef<number>(-1);
+  const releaseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const RELEASE_SECONDS = 0.9;
+
+  useEffect(() => {
+    waveRef.current = wave;
+    chordOscsRef.current.forEach((o) => (o.type = wave as any));
+  }, [wave]);
+
+  useEffect(() => {
+    simpleRef.current = simple;
+  }, [simple]);
+
+  useEffect(() => {
+    if (chordFilterRef.current) {
+      chordFilterRef.current.frequency.rampTo(cutoff, 0.05);
     }
-    return impulse;
-  }
+  }, [cutoff]);
+
+  const NUM_QUALITIES = QUALITY_KEYS.length;
+  const qualityLabels = QUALITY_KEYS.map((k) => k);
 
   async function initAudio() {
-    const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
-    audioCtxRef.current = ctx;
-    const master = ctx.createGain();
-    master.gain.value = 0.9;
-    const reverb = ctx.createConvolver();
-    reverb.buffer = makeImpulse(ctx);
-    const wet = ctx.createGain();
-    wet.gain.value = 0.25;
-    const dry = ctx.createGain();
-    dry.gain.value = 0.85;
-    master.connect(dry).connect(ctx.destination);
-    master.connect(reverb).connect(wet).connect(ctx.destination);
-    masterRef.current = master;
-    reverbRef.current = reverb;
+    await Tone.start();
+    const chordFilter = new Tone.Filter(cutoff, "lowpass").toDestination();
+    const chordGain = new Tone.Gain(0).connect(chordFilter);
+    const oscs: Tone.Oscillator[] = [];
+    for (let i = 0; i < 4; i++) {
+      const o = new Tone.Oscillator(220, waveRef.current).connect(chordGain);
+      o.start();
+      oscs.push(o);
+    }
+    chordOscsRef.current = oscs;
+    chordGainRef.current = chordGain;
+    chordFilterRef.current = chordFilter;
   }
 
-  // ===== Helpers geometria =====
   function getSector(x: number, y: number, cx: number, cy: number, num: number) {
     let angle = Math.atan2(y - cy, x - cx);
     angle = (angle + Math.PI * 2) % (Math.PI * 2);
     return Math.floor(angle / ((Math.PI * 2) / num));
   }
-  function pinch(lm: any) {
-    const dx = lm[4].x - lm[8].x;
-    const dy = lm[4].y - lm[8].y;
-    return 1 - Math.min(Math.sqrt(dx * dx + dy * dy) * 5, 1);
-  }
   function isInMuteZone(x: number, y: number, cx: number, cy: number, radius: number) {
     return Math.hypot(x - cx, y - cy) < radius * 0.35;
   }
 
-  // ===== Som =====
-  function playChord(idx: number) {
-    const ctx = audioCtxRef.current!;
-    const master = masterRef.current!;
-    stopChord();
-    const midis = chords[idx];
-    chordVoicesRef.current = midis.map(
-      (m) => new Voice(ctx, master, midiToHz(m), waveRef.current, 0.12)
-    );
-    currentChordRef.current = idx;
+  function sliceToRootMidi(i: number) {
+    return simpleRef.current ? DIATONIC_ROOTS[i] : i;
   }
-  function stopChord() {
-    chordVoicesRef.current.forEach((v) => v.release(1.4));
-    chordVoicesRef.current = [];
-    currentChordRef.current = -1;
-  }
-  function playNote(idx: number) {
-    const ctx = audioCtxRef.current!;
-    const master = masterRef.current!;
-    stopNote();
-    noteVoiceRef.current = new Voice(ctx, master, midiToHz(notesMidi[idx]), waveRef.current, 0.22);
-    currentNoteRef.current = idx;
-  }
-  function stopNote() {
-    if (noteVoiceRef.current) noteVoiceRef.current.release(0.9);
-    noteVoiceRef.current = null;
-    currentNoteRef.current = -1;
+  function sliceToRootName(i: number) {
+    return simpleRef.current ? DIATONIC_NAMES[i] : NOTE_NAMES[i];
   }
 
-  //Desenho das rodas e labels
+  function buildChordFreqs(rootIdx: number, qualityIdx: number): number[] {
+    const rootMidi = MIDI_BASE + sliceToRootMidi(rootIdx);
+    const intervals = CHORD_TYPES[QUALITY_KEYS[qualityIdx]].intervals;
+    const freqs: number[] = [];
+    for (let i = 0; i < 4; i++) {
+      const iv = i < intervals.length ? intervals[i] : intervals[0] + 12;
+      freqs.push(midiToFreq(rootMidi + iv));
+    }
+    return freqs;
+  }
+
+  function applyChord(rootIdx: number, qualityIdx: number) {
+    const oscs = chordOscsRef.current;
+    const cg = chordGainRef.current;
+    if (!oscs.length || !cg) return;
+    const freqs = buildChordFreqs(rootIdx, qualityIdx);
+    freqs.forEach((f, i) => {
+      oscs[i]?.frequency.rampTo(f, 0.12);
+    });
+    currentChordGainRef.current = 0.25;
+    cg.gain.cancelScheduledValues(Tone.now());
+    cg.gain.rampTo(currentChordGainRef.current, 0.06);
+    currentRootRef.current = rootIdx;
+    currentQualityRef.current = qualityIdx;
+  }
+
+  function silenceChord() {
+    const cg = chordGainRef.current;
+    if (!cg) return;
+    if (currentChordGainRef.current === 0 && currentRootRef.current === -1) return;
+    currentChordGainRef.current = 0;
+    cg.gain.cancelScheduledValues(Tone.now());
+    cg.gain.rampTo(0, RELEASE_SECONDS);
+    currentRootRef.current = -1;
+    currentQualityRef.current = -1;
+    if (releaseTimeoutRef.current) clearTimeout(releaseTimeoutRef.current);
+  }
+
   function drawWheel(
     ctx: CanvasRenderingContext2D,
     cx: number, cy: number, r: number,
@@ -264,7 +172,7 @@ const Index = () => {
       const tx = cx + Math.cos(mid) * (r * 0.7);
       const ty = cy + Math.sin(mid) * (r * 0.7);
       ctx.fillStyle = "white";
-      ctx.font = "13px Arial";
+      ctx.font = "14px Arial";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       ctx.fillText(labels[i] ?? "", tx, ty);
@@ -275,7 +183,6 @@ const Index = () => {
     ctx.fill();
   }
 
-  // ===== onResults =====
   function onResults(results: any) {
     const canvas = canvasRef.current!;
     const ctx = canvas.getContext("2d")!;
@@ -283,11 +190,14 @@ const Index = () => {
     canvas.height = window.innerHeight;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    const cx1 = canvas.width * 0.3;
-    const cx2 = canvas.width * 0.7;
-    const cy = canvas.height - 220;
+    const cx1 = canvas.width * 0.25;
+    const cx2 = canvas.width * 0.75;
+    const cy = canvas.height - 240;
+    const R = 180;
 
-    // Coletar as mãos detectadas
+    const NUM_ROOTS = simpleRef.current ? DIATONIC_NAMES.length : NOTE_NAMES.length;
+    const rootLabels = simpleRef.current ? DIATONIC_NAMES : NOTE_NAMES;
+
     const hands: { x: number; y: number; lm: any }[] = [];
     if (results.multiHandLandmarks) {
       for (const lm of results.multiHandLandmarks) {
@@ -299,83 +209,82 @@ const Index = () => {
       }
     }
 
-    // Atribuir cada mão à roda mais próxima (acorde ou melodia)
-    let chordHand: { x: number; y: number; lm: any } | null = null;
-    let noteHand: { x: number; y: number; lm: any } | null = null;
+    if (hands.length === 0) {
+      silenceChord();
+      drawWheel(ctx, cx1, cy, R, NUM_ROOTS, -1, rootLabels);
+      drawWheel(ctx, cx2, cy, R, NUM_QUALITIES, -1, qualityLabels as unknown as string[]);
+      ctx.fillStyle = "white";
+      ctx.font = "14px Arial";
+      ctx.textAlign = "left";
+      ctx.fillText(`Wave: ${waveRef.current}`, 30, 40);
+      ctx.fillText(`Acorde: —`, 30, 64);
+      return;
+    }
+
+    let rootHand: { x: number; y: number } | null = null;
+    let qualityHand: { x: number; y: number } | null = null;
 
     if (hands.length === 1) {
       const h = hands[0];
-      const dC = Math.hypot(h.x - cx1, h.y - cy);
-      const dN = Math.hypot(h.x - cx2, h.y - cy);
-      if (dC < dN) chordHand = h;
-      else noteHand = h;
+      const dL = Math.hypot(h.x - cx1, h.y - cy);
+      const dR = Math.hypot(h.x - cx2, h.y - cy);
+      if (dL < dR) rootHand = h; else qualityHand = h;
     } else if (hands.length >= 2) {
       const h0 = hands[0], h1 = hands[1];
-      // custo de cada atribuição: soma das distâncias às rodas
-      const costA =
-        Math.hypot(h0.x - cx1, h0.y - cy) + Math.hypot(h1.x - cx2, h1.y - cy);
-      const costB =
-        Math.hypot(h1.x - cx1, h1.y - cy) + Math.hypot(h0.x - cx2, h0.y - cy);
-      if (costA <= costB) {
-        chordHand = h0;
-        noteHand = h1;
-      } else {
-        chordHand = h1;
-        noteHand = h0;
-      }
+      const costA = Math.hypot(h0.x - cx1, h0.y - cy) + Math.hypot(h1.x - cx2, h1.y - cy);
+      const costB = Math.hypot(h1.x - cx1, h1.y - cy) + Math.hypot(h0.x - cx2, h0.y - cy);
+      if (costA <= costB) { rootHand = h0; qualityHand = h1; }
+      else { rootHand = h1; qualityHand = h0; }
     }
 
-    // Se nenhuma mão atribuída a uma roda, para o som correspondente
-    if (!chordHand && currentChordRef.current !== -1) stopChord();
-    if ((!noteHand || (CONFIG.mode === "melody-chord" && !chordHand)) && currentNoteRef.current !== -1) stopNote();
+    let selectedRoot = -1;
+    let selectedQuality = -1;
+    let rootHandOnWheel = false;
 
-    // RODA DE ACORDES
-    if (chordHand) {
-      const { x, y } = chordHand;
-      const muted = isInMuteZone(x, y, cx1, cy, 180);
-      if (muted) {
-        if (currentChordRef.current !== -1) stopChord();
-      } else {
-        const dist = Math.hypot(x - cx1, y - cy);
-        if (dist < 180) {
-          const chordIndex = getSector(x, y, cx1, cy, NUM_CHORDS);
-          if (chordIndex !== currentChordRef.current) playChord(chordIndex);
-        } else if (currentChordRef.current !== -1) stopChord();
+    if (rootHand) {
+      const { x, y } = rootHand;
+      const insideWheel = Math.hypot(x - cx1, y - cy) < R;
+      if (insideWheel && !isInMuteZone(x, y, cx1, cy, R)) {
+        selectedRoot = getSector(x, y, cx1, cy, NUM_ROOTS);
+        rootHandOnWheel = true;
       }
       ctx.beginPath();
       ctx.arc(x, y, 10, 0, Math.PI * 2);
-      ctx.fillStyle = muted ? "blue" : "cyan";
+      ctx.fillStyle = selectedRoot === -1 ? "blue" : "cyan";
       ctx.fill();
     }
 
-    // RODA DE NOTAS (melody-chord: só toca se acorde ativo)
-    if (noteHand) {
-      const { x, y } = noteHand;
-      const muted = isInMuteZone(x, y, cx2, cy, 180);
-      if (muted || (CONFIG.mode === "melody-chord" && currentChordRef.current === -1)) {
-        if (currentNoteRef.current !== -1) stopNote();
-      } else {
-        const dist = Math.hypot(x - cx2, y - cy);
-        if (dist < 220) {
-          let noteIndex = getSector(x, y, cx2, cy, NUM_NOTES);
-          if (CONFIG.snap) noteIndex = Math.max(0, Math.min(NUM_NOTES - 1, noteIndex));
-          if (noteIndex !== currentNoteRef.current) playNote(noteIndex);
-        } else if (currentNoteRef.current !== -1) stopNote();
+    if (qualityHand) {
+      const { x, y } = qualityHand;
+      const insideWheel = Math.hypot(x - cx2, y - cy) < R;
+      if (insideWheel && !isInMuteZone(x, y, cx2, cy, R)) {
+        selectedQuality = getSector(x, y, cx2, cy, NUM_QUALITIES);
       }
       ctx.beginPath();
       ctx.arc(x, y, 10, 0, Math.PI * 2);
-      ctx.fillStyle = muted ? "blue" : "red";
+      ctx.fillStyle = selectedQuality === -1 ? "blue" : "red";
       ctx.fill();
     }
 
-    drawWheel(ctx, cx1, cy, 180, NUM_CHORDS, currentChordRef.current, chordLabels);
-    drawWheel(ctx, cx2, cy, 180, NUM_NOTES, currentNoteRef.current, noteLabels);
+    if (rootHandOnWheel && selectedRoot !== -1) {
+      const effectiveQuality = selectedQuality !== -1 ? selectedQuality : 0;
+      applyChord(selectedRoot, effectiveQuality);
+    } else {
+      silenceChord();
+    }
+
+    drawWheel(ctx, cx1, cy, R, NUM_ROOTS, currentRootRef.current, rootLabels);
+    drawWheel(ctx, cx2, cy, R, NUM_QUALITIES, currentQualityRef.current, qualityLabels as unknown as string[]);
 
     ctx.fillStyle = "white";
     ctx.font = "14px Arial";
-    ctx.fillText(`Key: ${CONFIG.key} ${CONFIG.scale}`, 50, 40);
-    ctx.fillText(`wave: ${waveRef.current } | ${NUM_NOTES} notas`, 85, 64);
-    ctx.fillText(currentChordRef.current !== -1 ? "ACORDE ON" : "ACORDE OFF", 55, 104);
+    ctx.textAlign = "left";
+    ctx.fillText(`Wave: ${waveRef.current}`, 30, 40);
+    const label =
+      currentRootRef.current !== -1 && currentQualityRef.current !== -1
+        ? `${sliceToRootName(currentRootRef.current)}${CHORD_TYPES[QUALITY_KEYS[currentQualityRef.current]].suffix}`
+        : "—";
+    ctx.fillText(`Acorde: ${label}`, 30, 64);
   }
 
   async function startApp() {
@@ -386,8 +295,6 @@ const Index = () => {
 
       setStatus("Iniciando áudio...");
       await initAudio();
-      // Resume after gesture (autoplay policy)
-      await audioCtxRef.current?.resume();
 
       setStatus("Iniciando câmera...");
       const hands = new window.Hands({
@@ -419,56 +326,76 @@ const Index = () => {
 
   useEffect(() => {
     return () => {
-      stopChord();
-      stopNote();
-      audioCtxRef.current?.close();
+      chordOscsRef.current.forEach((o) => { try { o.stop(); o.dispose(); } catch {} });
+      chordGainRef.current?.dispose();
+      chordFilterRef.current?.dispose();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (
-    <div className="relative min-h-screen w-full overflow-hidden bg-background text-foreground">
-      <video ref={videoRef} className="absolute inset-0 h-full w-full object-cover -scale-x-100" playsInline muted />
-      <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" />
+    <div className="relative min-h-screen w-full overflow-hidden bg-background">
+      <video ref={videoRef} className="absolute inset-0 h-full w-full object-cover scale-x-[-1]" playsInline muted />
+      <canvas ref={canvasRef} className="absolute inset-0 h-full w-full pointer-events-none" />
 
-      {/* Seletor de waveform — sempre visível */}
-      <div className="absolute top-4 right-4 z-10 flex flex-col gap-2 rounded-lg bg-background/70 backdrop-blur p-3 border border-border">
-        <span className="text-xs text-muted-foreground uppercase tracking-wide">Forma de Onda</span>
-        <div className="flex gap-1">
-          {(["sine", "triangle", "square", "sawtooth"] as OscillatorType[]).map((w) => (
-            <button
-              key={w}
-              onClick={() => setWave(w)}
-              className={`px-3 py-1.5 rounded text-xs font-medium transition border border-gray-600 ${
-                wave === w
-                  ? "bg-primary text-primary-foreground"
-                  : "bg-muted text-muted-foreground hover:bg-muted/70"
-              }`}
-            >
-              {w}
-            </button>
-          ))}
+      <div className="absolute top-4 right-4 z-10 bg-black/60 backdrop-blur p-4 rounded-lg text-white space-y-3 w-100">
+        <div>
+          <div className="text-xs uppercase tracking-wide opacity-70 mb-2 ">Forma de Onda</div>
+          <div className="flex flex-wrap gap-2">
+            {(["sine", "triangle", "square", "sawtooth"] as const).map((w) => (
+              <button
+                key={w}
+                onClick={() => setWave(w)}
+                className={`px-3 py-1.5 rounded text-xs font-medium transition border border-white/20 ${
+                  wave === w
+                    ? "bg-primary text-primary-foreground"
+                    : "bg-muted text-muted-foreground hover:bg-muted/70"
+                }`}
+              >
+                {w}
+              </button>
+            ))}
+               <div className="flex justify-between text-xs mb-1 ">
+            <span>Filtro Lowpass</span>
+            <span>{cutoff} Hz</span>
+              <input
+            type="checkbox"
+            checked={simple}
+            onChange={(e) => setSimple(e.target.checked)}
+            className="accent-primary ml-2"
+          />
+          Modo simples (7 raízes diatônicas)
+          </div>
+          </div>
+        </div>
+        <div>
+          <input
+            type="range"
+            min={200}
+            max={8000}
+            step={50}
+            value={cutoff}
+            onChange={(e) => setCutoff(Number(e.target.value))}
+            className="w-full accent-primary cursor-pointer"
+          />
         </div>
       </div>
 
       {!started && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 bg-background/80 backdrop-blur">
-          <h1 className="text-3xl font-semibold">Sound Hand Synth · Web Audio</h1>
-          <p className="text-muted-foreground text-sm max-w-md text-center">
-            Modo {CONFIG.mode} · Tom {CONFIG.key} {CONFIG.scale} · onda {wave} · {MELODY_NOTES.length} notas · snap {CONFIG.snap ? "on" : "off"}
+        <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-background/90 text-foreground p-6 text-center">
+          <h1 className="text-3xl font-bold mb-3">Sound Hand Synth · WebAudio</h1>
+          <p className="max-w-md text-sm text-muted-foreground mb-6">
+            WebAudioAPI com 4 osciladores, MIDI base 48, filtro lowpass e 8 qualidades de acorde
+            (maj, maj7, 7, sus4, m, m7, dim, aug).
           </p>
           <button
             onClick={startApp}
-            className="rounded-md bg-primary px-6 py-3 text-primary-foreground transition border"
+            className="px-6 py-3 rounded-md bg-primary text-primary-foreground font-medium hover:bg-primary/90 transition border"
           >
             Iniciar
           </button>
-          {status && <p className="text-sm text-muted-foreground">{status}</p>}
+          {status && <p className="mt-4 text-sm text-muted-foreground">{status}</p>}
         </div>
       )}
     </div>
   );
-};
-
-export default Index;
-
+}
