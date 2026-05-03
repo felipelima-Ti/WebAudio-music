@@ -180,8 +180,8 @@ export default function SoundHandSynth() {
       ctx.fillText(labels[i] ?? "", tx, ty);
     }
     ctx.beginPath();
-    ctx.arc(cx, cy, r * 0.2, 0, Math.PI * 2);
-    ctx.fillStyle = "rgba(0,0,0,0.7)";
+    ctx.arc(cx, cy, r * 0.4, 0, Math.PI * 2);
+    ctx.fillStyle = "#262625";
     ctx.fill();
   }
 // Função chamada a cada frame com os resultados da detecção de mãos, responsável por desenhar as rodas e determinar os acordes a tocar com base na posição das mãos
