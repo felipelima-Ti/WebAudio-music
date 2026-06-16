@@ -63,16 +63,15 @@ export default function SoundHandSynth() {
   const currentQualityRef = useRef<number>(-1);
   const releaseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const RELEASE_SECONDS = 0.9;
-// Mantém uma referência atualizada da forma de onda para uso nas funções de mapeamento, evitando problemas de closure
+// Mantém uma referência atualizada da forma de onda 
   useEffect(() => {
     waveRef.current = wave;
     chordOscsRef.current.forEach((o) => (o.type = wave as any));
   }, [wave]);
-// Mantém uma referência atualizada do modo simples para uso nas funções de mapeamento, evitando problemas de closure
   useEffect(() => {
     simpleRef.current = simple;
   }, [simple]);
-// Atualiza a frequência de corte do filtro lowpass sempre que o valor de cutoff mudar, com um pequeno fade para evitar cliques
+// Atualiza a frequência de corte do filtro lowpass sempre que o valor de cutoff mudar
   useEffect(() => {
     if (chordFilterRef.current) {
       chordFilterRef.current.frequency.rampTo(cutoff, 0.05);
@@ -292,7 +291,7 @@ export default function SoundHandSynth() {
     ctx.fillText(`Acorde: ${label}`, 30, 64);
   }
 
-  async function startApp() {
+  async function startApp(){
     setStatus("Carregando MediaPipe...");
     try {
       await loadScript("https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js");
