@@ -46,15 +46,14 @@ O projeto foi desenvolvido com foco educacional e experimental, permitindo explo
 ---
 
 ##  Como Funciona
-A funcao initAudio Função para inicializar o áudio usando ToneJS, criando os osciladores,filtro necessários para tocar os acordes
-O sintetizador utiliza quatro osciladores simultâneos.Cada oscilador reproduz uma nota do acorde.
-A frequência sintese sonora é calculada na constante midiTofreq a partir do número MIDI utilizando: f=440×212(m−69)​/12
-A funçao drawWhell exibe duas rodas interativas na tela:
-A funcão sliceToRootName: Função para converter um índice para o nome da nota correspondente, dependendo do modo simples ou completo, DIATONIC_NAMES | NOTE_NAMES
-Captura e Rastreamento das Mãos
+A funcao initAudio Função para inicializar o áudio usando ToneJS, criando os osciladores,filtro necessários para tocar os acordes<br/>
+O sintetizador utiliza quatro osciladores simultâneos.Cada oscilador reproduz uma nota do acorde.<br/>
+A frequência sintese sonora é calculada na constante midiTofreq a partir do número MIDI utilizando: f=440×212(m−69)​/12<br/>
+A funçao drawWhell exibe duas rodas interativas na tela<br/>
+A funcão sliceToRootName: Função para converter um índice para o nome da nota correspondente, dependendo do modo simples ou completo, DIATONIC_NAMES | NOTE_NAMES<br/>
 Biblioteca utilizada:
-MediaPipe Hands,Webcam API
-a funçao startApp tenta carrega Mediapipe e todos o scripts pendentes
+MediaPipe Hands,Tonejs,web audio api,Webcam API<br/>
+a funçao startApp tenta carrega Mediapipe e todos os scripts pendentes
 
 
 ### Roda de Notas (Esquerda)
@@ -63,28 +62,28 @@ Responsável por selecionar a nota fundamental do acorde.
 
 #### Modo Simples
 
-- C
-- D
-- E
-- F
-- G
-- A
-- B
+  C,
+  D,
+ E,
+F,
+G,
+ A,
+ B
 
 #### Modo Completo
 
-- C
-- C#
-- D
-- D#
-- E
-- F
-- F#
-- G
-- G#
-- A
-- A#
-- B
+C,
+C#,
+ D,
+ D#,
+ E,
+ F,
+ F#,
+ G,
+ G#,
+ A,
+ A#,
+ B
 
 ### Roda de Qualidades (Direita)
 
@@ -143,7 +142,7 @@ Quanto menor a frequência, mais suave será o timbre produzido.
 
 ---
 
-## 🔊 Arquitetura de Áudio
+## Arquitetura de Áudio
 
 O sintetizador utiliza:
 
